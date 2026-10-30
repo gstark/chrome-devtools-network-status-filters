@@ -93,12 +93,16 @@ homebrew:
 
       app "Helium Dev.app"
 
+      # The build is signed but not notarized, so remove the quarantine flag to let it open.
       postflight_steps do
-        # The build is signed but not notarized, so remove the quarantine flag to let it open.
         run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{{{appdir}}/Helium Dev.app"]
-        # Make Helium Dev the default browser. macOS asks for confirmation.
-        run "/usr/bin/open", args: ["-a", "{{{{appdir}}/Helium Dev.app", "--args", "--make-default"]
       end
+
+      caveats <<~CAVEATS
+        Open Helium Dev once to make it the default browser. macOS asks you to confirm.
+        To ask again later, run:
+          open -a "Helium Dev" --args --make-default
+      CAVEATS
     end
     EOF
     git -C "$tap_dir" add Casks/helium-dev.rb

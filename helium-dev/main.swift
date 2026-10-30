@@ -40,13 +40,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--make-default") {
-            makeDefault()
+            makeDefault { NSApp.terminate(nil) }
             return
         }
+        // Ask once to become the default browser. The Homebrew sandbox cannot open the app to do this at install.
+        let offeredKey = "OfferedDefaultBrowser"
+        let offered = UserDefaults.standard.bool(forKey: offeredKey)
+        UserDefaults.standard.set(true, forKey: offeredKey)
         // Give the launch Apple Event time to deliver its URLs.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            self.ready = true
-            self.process()
+            let start = {
+                self.ready = true
+                self.process()
+            }
+            if offered { start() } else { self.makeDefault(then: start) }
         }
     }
 
@@ -125,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Make Helium Dev the default browser and the default app for HTML files.
-    private func makeDefault() {
+    private func makeDefault(then done: @escaping () -> Void) {
         let appURL = Bundle.main.bundleURL
         LSRegisterURL(appURL as CFURL, true)
         let workspace = NSWorkspace.shared
@@ -136,18 +143,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for type in [UTType.html, UTType(importedAs: "public.xhtml")] where workspace.urlForApplication(toOpen: type) != appURL {
             steps.append { workspace.setDefaultApplication(at: appURL, toOpen: type, completion: $0) }
         }
-        runSteps(steps)
+        runSteps(steps, then: done)
     }
 
-    private func runSteps(_ steps: [(@escaping (Error?) -> Void) -> Void]) {
-        guard let step = steps.first else { return NSApp.terminate(nil) }
+    private func runSteps(_ steps: [(@escaping (Error?) -> Void) -> Void], then done: @escaping () -> Void) {
+        guard let step = steps.first else { return done() }
         step { error in
             DispatchQueue.main.async {
                 if let error {
                     showAlert("Helium Dev is not the default browser", error.localizedDescription)
-                    return NSApp.terminate(nil)
+                    return done()
                 }
-                self.runSteps(Array(steps.dropFirst()))
+                self.runSteps(Array(steps.dropFirst()), then: done)
             }
         }
     }
