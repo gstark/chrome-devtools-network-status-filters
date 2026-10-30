@@ -1,0 +1,486 @@
+From 2c741a9578b13a90f4201e4f5ad7940f561e515b Mon Sep 17 00:00:00 2001
+From: Gavin Stark <gavin@gstark.com>
+Date: Fri, 23 Oct 2026 10:24:21 -0400
+Subject: [PATCH] [network] Add status code filters to the Network panel
+
+Add a filter group with 2xx, 3xx, 4xx, 5xx and Custom... buttons after
+the resource type filters. The status class buttons work like the
+resource type buttons: a click selects one class, and Ctrl+click (Cmd+click
+on Mac) selects more than one.
+
+Custom... opens an input for a status code expression: single codes
+(404), ranges (200-204 or 200..204), comparisons (>=500, !=304) and
+comma-separated lists of these. A request matches if it matches any
+selected class or the expression. While the expression is empty, the
+Custom button does not filter. Requests with status code 0 never match.
+
+Bug: none
+---
+ .../panels/network/NetworkLogView.test.ts     | 174 ++++++++++++++++++
+ front_end/panels/network/NetworkLogView.ts    | 167 +++++++++++++++++
+ .../ui/visual_logging/KnownContextValues.ts   |   8 +
+ 3 files changed, 349 insertions(+)
+
+diff --git a/front_end/panels/network/NetworkLogView.test.ts b/front_end/panels/network/NetworkLogView.test.ts
+index b8471e98..03bd5204 100644
+--- a/front_end/panels/network/NetworkLogView.test.ts
++++ b/front_end/panels/network/NetworkLogView.test.ts
+@@ -1080,6 +1080,180 @@ describeWithEnvironment('NetworkLogView', () => {
+     assert.deepEqual(shownRequestUrls(), ['urlFetch']);
+   });
+ 
++  describe('status code filter', () => {
++    function setUpStatusCodeFilter() {
++      for (const statusCode of [0, 200, 301, 404, 500]) {
++        const request = createNetworkRequest(`url${statusCode}`, {finished: true});
++        request.statusCode = statusCode;
++      }
++
++      const filterBar = new UI.FilterBar.FilterBar('network-panel', true);
++      networkLogView = createNetworkLogView(filterBar);
++      renderElementIntoDOM(networkLogView);
++      const rootNode = networkLogView.columns().dataGrid().rootNode();
++      const shownRequestUrls = () => rootNode.children.map(
++          n => (n as Network.NetworkDataGridNode.NetworkNode).request()?.url() as string | undefined);
++
++      const clickStatusButton = (label: string, multiSelect = false) => {
++        const group = filterBar.element.querySelector('[aria-label="Status codes to include"]');
++        const button = [...group?.querySelectorAll('span') ?? []].find(span => span.textContent === label);
++        assert.exists(button);
++        button.dispatchEvent(
++            new MouseEvent('click', {bubbles: true, [Host.Platform.isMac() ? 'metaKey' : 'ctrlKey']: multiSelect}));
++      };
++
++      return {shownRequestUrls, clickStatusButton};
++    }
++
++    it('shows every request when "All" is active', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++      assert.deepEqual(shownRequestUrls(), ['url0', 'url200', 'url301', 'url404', 'url500']);
++
++      clickStatusButton('4xx');
++      clickStatusButton('All');
++      assert.deepEqual(shownRequestUrls(), ['url0', 'url200', 'url301', 'url404', 'url500']);
++    });
++
++    it('shows only 4xx requests when "4xx" is active', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('4xx');
++      assert.deepEqual(shownRequestUrls(), ['url404']);
++    });
++
++    it('shows multiple status classes with multi-select', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('4xx');
++      clickStatusButton('5xx', true);
++      assert.deepEqual(shownRequestUrls(), ['url404', 'url500']);
++    });
++
++    it('hides requests with status code 0 when a status class is active', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      for (const label of ['2xx', '3xx', '4xx', '5xx']) {
++        clickStatusButton(label);
++        assert.notInclude(shownRequestUrls(), 'url0');
++        assert.lengthOf(shownRequestUrls(), 1);
++      }
++    });
++
++    function submitStatusCodeExpression(expression: string): HTMLInputElement {
++      const input = UI.Dialog.Dialog.getInstance()?.contentElement.querySelector('input');
++      assert.exists(input);
++      input.value = expression;
++      input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter'}));
++      return input;
++    }
++
++    it('filters by a custom status code expression', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('Custom…');
++      submitStatusCodeExpression('301, >=500');
++      assert.isFalse(UI.Dialog.Dialog.hasInstance());
++      assert.deepEqual(shownRequestUrls(), ['url301', 'url500']);
++
++      // The button shows the expression, and a click opens the dialog with it.
++      clickStatusButton('301, >=500');
++      assert.strictEqual(UI.Dialog.Dialog.getInstance()?.contentElement.querySelector('input')?.value, '301, >=500');
++      UI.Dialog.Dialog.getInstance()?.hide();
++    });
++
++    it('combines the custom expression with status classes on multi-select', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('Custom…');
++      submitStatusCodeExpression('200');
++      clickStatusButton('4xx', true);
++      assert.isFalse(UI.Dialog.Dialog.hasInstance());
++      assert.deepEqual(shownRequestUrls(), ['url200', 'url404']);
++    });
++
++    it('keeps the dialog open for an invalid expression', () => {
++      const {clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('Custom…');
++      const input = submitStatusCodeExpression('abc');
++      assert.isTrue(UI.Dialog.Dialog.hasInstance());
++      assert.strictEqual(input.getAttribute('aria-invalid'), 'true');
++      UI.Dialog.Dialog.getInstance()?.hide();
++    });
++
++    it('shows every request while Custom has no expression', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('Custom…');
++      assert.isTrue(UI.Dialog.Dialog.hasInstance());
++      assert.deepEqual(shownRequestUrls(), ['url0', 'url200', 'url301', 'url404', 'url500']);
++      UI.Dialog.Dialog.getInstance()?.hide();
++    });
++
++    it('deselects Custom when the dialog closes without an expression', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('Custom…');
++      UI.Dialog.Dialog.getInstance()?.hide();
++      assert.deepEqual(shownRequestUrls(), ['url0', 'url200', 'url301', 'url404', 'url500']);
++    });
++
++    it('deselects Custom when the expression is cleared', () => {
++      const {shownRequestUrls, clickStatusButton} = setUpStatusCodeFilter();
++
++      clickStatusButton('Custom…');
++      submitStatusCodeExpression('404');
++      clickStatusButton('404');
++      submitStatusCodeExpression('');
++      assert.isFalse(UI.Dialog.Dialog.hasInstance());
++      assert.deepEqual(shownRequestUrls(), ['url0', 'url200', 'url301', 'url404', 'url500']);
++      clickStatusButton('Custom…');
++      UI.Dialog.Dialog.getInstance()?.hide();
++    });
++  });
++
++  describe('parseStatusCodeExpression', () => {
++    const statusCodes = [0, 199, 200, 204, 205, 301, 304, 399, 400, 404, 500, 503];
++    function matchingStatusCodes(expression: string): number[] {
++      const matcher = Network.NetworkLogView.parseStatusCodeExpression(expression);
++      assert.exists(matcher);
++      return statusCodes.filter(statusCode => matcher(statusCode));
++    }
++
++    it('matches a single status code', () => {
++      assert.deepEqual(matchingStatusCodes('404'), [404]);
++    });
++
++    it('matches inclusive ranges with "-" and ".."', () => {
++      assert.deepEqual(matchingStatusCodes('200-204'), [200, 204]);
++      assert.deepEqual(matchingStatusCodes('200..204'), [200, 204]);
++      assert.deepEqual(matchingStatusCodes(' 200 - 204 '), [200, 204]);
++    });
++
++    it('matches comparisons', () => {
++      assert.deepEqual(matchingStatusCodes('>=500'), [500, 503]);
++      assert.deepEqual(matchingStatusCodes('>399'), [400, 404, 500, 503]);
++      assert.deepEqual(matchingStatusCodes('<=204'), [199, 200, 204]);
++      assert.deepEqual(matchingStatusCodes('< 200'), [199]);
++      assert.deepEqual(matchingStatusCodes('!=304'), [199, 200, 204, 205, 301, 399, 400, 404, 500, 503]);
++    });
++
++    it('matches any term of a comma-separated list', () => {
++      assert.deepEqual(matchingStatusCodes('404, 200-204, >=503'), [200, 204, 404, 503]);
++    });
++
++    it('never matches status code 0', () => {
++      assert.notInclude(matchingStatusCodes('<300'), 0);
++      assert.notInclude(matchingStatusCodes('0-999'), 0);
++    });
++
++    it('rejects empty and invalid expressions', () => {
++      for (const expression of ['', ' ', 'abc', '4xx', '204-200', '1000', '200,', '>=', '200-', '=>200']) {
++        assert.isNull(Network.NetworkLogView.parseStatusCodeExpression(expression), expression);
++      }
++    });
++  });
++
+   it('can apply substring filter on same-site domain', async () => {
+     target.setInspectedURL(urlString`http://example.com`);
+     const sameSiteRequest = createNetworkRequest(urlString`http://example.com/api/data`, {});
+diff --git a/front_end/panels/network/NetworkLogView.ts b/front_end/panels/network/NetworkLogView.ts
+index b9bbc8f5..8fd36b6c 100644
+--- a/front_end/panels/network/NetworkLogView.ts
++++ b/front_end/panels/network/NetworkLogView.ts
+@@ -104,6 +104,24 @@ const UIStrings = {
+    * @description Aria accessible name in Network Log View of the Network panel
+    */
+   requestTypesToInclude: 'Request types to include',
++  /**
++   * @description Aria accessible name in Network Log View of the Network panel for the HTTP status code class filter
++   */
++  statusCodesToInclude: 'Status codes to include',
++  /**
++   * @description Label of a button in the Network panel status code filter. A click opens a text input for a custom
++   *             status code expression.
++   */
++  custom: 'Custom…',
++  /**
++   * @description Tooltip of the button that filters Network panel requests by a custom status code expression
++   */
++  filterByCustomStatusCodes:
++      'Filter by status codes, ranges and comparisons, for example 404, 200-204, 200..204, >=500',
++  /**
++   * @description Aria accessible name of the text input for a custom status code expression in the Network panel
++   */
++  statusCodeExpression: 'Status code expression',
+   /**
+    * @description Label for a checkbox in the Network panel. When checked, only requests with
+    *             blocked response cookies are shown.
+@@ -552,6 +570,47 @@ const enum FetchStyle {
+   NODE_JS = 1,
+ }
+ 
++const CUSTOM_STATUS_CODES = 'custom-status-codes';
++
++const statusCodeComparisons: Record<string, (statusCode: number, value: number) => boolean> = {
++  '': (statusCode, value) => statusCode === value,
++  '!=': (statusCode, value) => statusCode !== value,
++  '<': (statusCode, value) => statusCode < value,
++  '<=': (statusCode, value) => statusCode <= value,
++  '>': (statusCode, value) => statusCode > value,
++  '>=': (statusCode, value) => statusCode >= value,
++};
++
++/**
++ * Parses a comma-separated list of status codes (`404`), ranges (`200-204`, `200..204`)
++ * and comparisons (`>=500`, `!=304`). A status code matches if it matches any term.
++ * Status code 0 (failed, blocked or unfinished requests) never matches.
++ * Returns null for an empty or invalid expression.
++ */
++export function parseStatusCodeExpression(expression: string): ((statusCode: number) => boolean)|null {
++  const matchers: Array<(statusCode: number) => boolean> = [];
++  for (const term of expression.split(',')) {
++    const range = /^\s*(\d{1,3})\s*(?:-|\.\.)\s*(\d{1,3})\s*$/.exec(term);
++    if (range) {
++      const from = Number(range[1]);
++      const to = Number(range[2]);
++      if (from > to) {
++        return null;
++      }
++      matchers.push(statusCode => statusCode >= from && statusCode <= to);
++      continue;
++    }
++    const comparison = /^\s*(!=|<=|>=|<|>)?\s*(\d{1,3})\s*$/.exec(term);
++    if (!comparison) {
++      return null;
++    }
++    const compare = statusCodeComparisons[comparison[1] ?? ''];
++    const value = Number(comparison[2]);
++    matchers.push(statusCode => compare(statusCode, value));
++  }
++  return statusCode => statusCode !== 0 && matchers.some(matcher => matcher(statusCode));
++}
++
+ const NetworkLogViewBase: Common.ObjectWrapper.EventMixin<EventTypes, typeof UI.Widget.VBox> =
+     Common.ObjectWrapper.eventMixin(
+         UI.Widget.VBox,
+@@ -566,6 +625,8 @@ export class NetworkLogView extends NetworkLogViewBase implements
+   private readonly networkOnlyBlockedRequestsSetting: Common.Settings.Setting<boolean>;
+   private readonly networkOnlyThirdPartySetting: Common.Settings.Setting<boolean>;
+   private readonly networkResourceTypeFiltersSetting: Common.Settings.Setting<Record<string, boolean>>;
++  private readonly networkStatusClassFiltersSetting: Common.Settings.Setting<Record<string, boolean>>;
++  private readonly networkStatusCodeExpressionSetting: Common.Settings.Setting<string>;
+   private readonly networkShowOptionsToGenerateHarWithSensitiveData: Common.Settings.Setting<boolean>;
+   private readonly progressBarContainer: Element;
+   private readonly networkLogLargeRowsSetting: Common.Settings.Setting<boolean>;
+@@ -592,6 +653,7 @@ export class NetworkLogView extends NetworkLogViewBase implements
+   private readonly invertFilterUI: UI.FilterBar.CheckboxFilterUI;
+   private readonly moreFiltersDropDownUI: MoreFiltersDropDownUI|undefined;
+   private readonly resourceCategoryFilterUI: UI.FilterBar.NamedBitSetFilterUI;
++  private readonly statusClassFilterUI: UI.FilterBar.NamedBitSetFilterUI;
+   private readonly filterParser: TextUtils.TextUtils.FilterParser;
+   private readonly suggestionBuilder: UI.FilterSuggestionBuilder.FilterSuggestionBuilder;
+   private dataGrid: DataGrid.SortableDataGrid.SortableDataGrid<NetworkNode>;
+@@ -627,6 +689,10 @@ export class NetworkLogView extends NetworkLogViewBase implements
+         Common.Settings.Settings.instance().createSetting('network-only-third-party-setting', false);
+     this.networkResourceTypeFiltersSetting =
+         Common.Settings.Settings.instance().createSetting('network-resource-type-filters', {});
++    this.networkStatusClassFiltersSetting =
++        Common.Settings.Settings.instance().createSetting('network-status-class-filters', {});
++    this.networkStatusCodeExpressionSetting =
++        Common.Settings.Settings.instance().createSetting('network-status-code-expression', '');
+     this.networkShowOptionsToGenerateHarWithSensitiveData = Common.Settings.Settings.instance().createSetting(
+         'network.show-options-to-generate-har-with-sensitive-data', false);
+ 
+@@ -700,6 +766,30 @@ export class NetworkLogView extends NetworkLogViewBase implements
+     this.resourceCategoryFilterUI.addEventListener(
+         UI.FilterBar.FilterUIEvents.FILTER_CHANGED, this.filterChanged.bind(this), this);
+     filterBar.addFilter(this.resourceCategoryFilterUI);
++    filterBar.addDivider();
++
++    const statusClassItems: UI.FilterBar.Item[] = ['2xx', '3xx', '4xx', '5xx'].map(statusClass => {
++      return {name: statusClass, label: () => statusClass, jslogContext: statusClass};
++    });
++    statusClassItems.push({
++      name: CUSTOM_STATUS_CODES,
++      label: () => i18nString(UIStrings.custom),
++      title: i18nString(UIStrings.filterByCustomStatusCodes),
++      jslogContext: CUSTOM_STATUS_CODES,
++    });
++    this.statusClassFilterUI =
++        new UI.FilterBar.NamedBitSetFilterUI(statusClassItems, this.networkStatusClassFiltersSetting);
++    UI.ARIAUtils.setLabel(this.statusClassFilterUI.element(), i18nString(UIStrings.statusCodesToInclude));
++    this.statusClassFilterUI.addEventListener(UI.FilterBar.FilterUIEvents.FILTER_CHANGED, this.filterChanged.bind(this),
++                                              this);
++    this.statusClassFilterUI.element().addEventListener('click', this.onStatusClassFilterActivated.bind(this));
++    this.statusClassFilterUI.element().addEventListener('keydown', event => {
++      if (event instanceof KeyboardEvent && Platform.KeyboardUtilities.isEnterOrSpaceKey(event)) {
++        this.onStatusClassFilterActivated(event);
++      }
++    });
++    filterBar.addFilter(this.statusClassFilterUI);
++    this.updateCustomStatusCodesLabel();
+ 
+     this.filterParser = new TextUtils.TextUtils.FilterParser(searchKeys);
+     this.suggestionBuilder =
+@@ -1644,6 +1734,76 @@ export class NetworkLogView extends NetworkLogViewBase implements
+     this.networkOnlyThirdPartySetting.set(false);
+     this.networkHideChromeExtensions.set(false);
+     this.resourceCategoryFilterUI.reset();
++    this.statusClassFilterUI.reset();
++  }
++
++  private customStatusCodesElement(): HTMLElement|null {
++    return this.statusClassFilterUI.element().querySelector(`.${CUSTOM_STATUS_CODES}`);
++  }
++
++  private updateCustomStatusCodesLabel(): void {
++    const element = this.customStatusCodesElement();
++    if (element) {
++      element.textContent = this.networkStatusCodeExpressionSetting.get() || i18nString(UIStrings.custom);
++    }
++  }
++
++  private setStatusCodeExpression(expression: string): void {
++    this.networkStatusCodeExpressionSetting.set(expression);
++    this.updateCustomStatusCodesLabel();
++    this.filterChanged();
++  }
++
++  private onStatusClassFilterActivated(event: Event): void {
++    // The bit set filter handles the click first, so a selected custom bit was just selected or kept.
++    const element = this.customStatusCodesElement();
++    if (element && event.target === element && this.statusClassFilterUI.isActive() &&
++        this.statusClassFilterUI.accept(CUSTOM_STATUS_CODES)) {
++      this.showStatusCodeExpressionDialog(element);
++    }
++  }
++
++  private showStatusCodeExpressionDialog(anchor: HTMLElement): void {
++    const dialog = new UI.Dialog.Dialog('status-code-expression');
++    dialog.setAriaLabel(i18nString(UIStrings.statusCodeExpression));
++    dialog.setSizeBehavior(UI.GlassPane.SizeBehavior.MEASURE_CONTENT);
++    dialog.setAnchorBehavior(UI.GlassPane.AnchorBehavior.PREFER_BOTTOM);
++    dialog.setContentAnchorBox(anchor.boxInWindow());
++
++    const input = UI.UIUtils.createInput('', 'text', 'status-code-expression');
++    input.value = this.networkStatusCodeExpressionSetting.get();
++    input.placeholder = i18n.i18n.lockedString('404, 200-204, >=500');
++    UI.ARIAUtils.setLabel(input, i18nString(UIStrings.statusCodeExpression));
++    const setInvalid = (invalid: boolean): void => {
++      input.classList.toggle('error-input', invalid);
++      UI.ARIAUtils.setInvalid(input, invalid);
++    };
++    input.addEventListener('input', () => setInvalid(false));
++    input.addEventListener('keydown', event => {
++      if (event.key !== 'Enter') {
++        return;
++      }
++      event.consume(true);
++      const expression = input.value.trim();
++      if (expression && !parseStatusCodeExpression(expression)) {
++        setInvalid(true);
++        return;
++      }
++      this.setStatusCodeExpression(expression);
++      dialog.hide();
++    });
++    dialog.contentElement.appendChild(input);
++    dialog.setDefaultFocusedElement(input);
++
++    dialog.addEventListener(UI.Dialog.Events.HIDDEN, () => {
++      // Without an expression the custom bit does not filter, so deselect it.
++      if (!this.networkStatusCodeExpressionSetting.get()) {
++        const filters = {...this.networkStatusClassFiltersSetting.get()};
++        delete filters[CUSTOM_STATUS_CODES];
++        this.networkStatusClassFiltersSetting.set(filters);
++      }
++    });
++    dialog.show(this.element);
+   }
+ 
+   private createNodeForRequest(request: SDK.NetworkRequest.NetworkRequest): NetworkRequestNode {
+@@ -2238,6 +2398,13 @@ export class NetworkLogView extends NetworkLogViewBase implements
+     if (!this.resourceCategoryFilterUI.accept(categoryName)) {
+       return false;
+     }
++    // Without an expression, for example while the dialog is open, the custom bit matches every request.
++    const statusCodeExpression = this.networkStatusCodeExpressionSetting.get();
++    if (!this.statusClassFilterUI.accept(`${Math.floor(request.statusCode / 100)}xx`) &&
++        !(this.statusClassFilterUI.accept(CUSTOM_STATUS_CODES) &&
++          (!statusCodeExpression || parseStatusCodeExpression(statusCodeExpression)?.(request.statusCode)))) {
++      return false;
++    }
+     const [hideDataURL, blockedCookies, blockedRequests, thirdParty, hideExtensionURL] = [
+       this.networkHideDataURLSetting.get(),
+       this.networkShowBlockedCookiesOnlySetting.get(),
+diff --git a/front_end/ui/visual_logging/KnownContextValues.ts b/front_end/ui/visual_logging/KnownContextValues.ts
+index dec68144..9aaece12 100644
+--- a/front_end/ui/visual_logging/KnownContextValues.ts
++++ b/front_end/ui/visual_logging/KnownContextValues.ts
+@@ -220,14 +220,18 @@ export const knownContextValues: Set<string> = new Set([
+   '2.5',
+   '20',
+   '200%',
++  '2xx',
+   '3',
+   '3.5',
+   '3g',
++  '3xx',
+   '4',
+   '42',
+   '44',
++  '4xx',
+   '5',
+   '50%',
++  '5xx',
+   '6',
+   '7',
+   '75%',
+@@ -1312,6 +1316,7 @@ export const knownContextValues: Set<string> = new Set([
+   'custom-network-conditions',
+   'custom-network-throttling-item',
+   'custom-property',
++  'custom-status-codes',
+   'custom-user-agent',
+   'custom-user-agent-metadata',
+   'customize-pwa-tittle-bar',
+@@ -2964,6 +2969,8 @@ export const knownContextValues: Set<string> = new Set([
+   'network-settings',
+   'network-show-blocked-cookies-only-setting',
+   'network-show-settings-toolbar',
++  'network-status-class-filters',
++  'network-status-code-expression',
+   'network-text-filter',
+   'network-track-widget',
+   'network-web-socket-message-filter',
+@@ -4055,6 +4062,7 @@ export const knownContextValues: Set<string> = new Set([
+   'static-global-setting',
+   'static-synced-setting',
+   'status',
++  'status-code-expression',
+   'step',
+   'step-actions',
+   'step-editor',
+-- 
+2.56.0
+
